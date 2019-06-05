@@ -16,6 +16,15 @@ module Args = struct
   open Cmdliner
   open Arg
 
+  type command = Create_token
+
+  let commands = 
+    value & pos_all (Arg.enum [
+    "grade", Grade;  
+    "create_token", Create_token;
+    ]) [Grade] &
+  info [] ~docs:"COMMANDS" ~docv:"COMMAND"
+
   type t = {
     server_url: Uri.t option;
     solution_file: string option;
@@ -24,6 +33,7 @@ module Args = struct
     submit: bool;
     color: bool;
     verbosity: int;
+    create_token: string option;
     token: Learnocaml_data.student Learnocaml_data.token option;
     local: bool;
     set_options: bool;
@@ -91,6 +101,10 @@ module Args = struct
     value & flag_all & info ["v";"verbose"] ~doc:
       "Be more verbose. Can be repeated"
 
+  let create_token =
+    value & opt (some string) None & info ["create_token"] ~doc:
+      "Create a new Token for an user"
+      
   let token =
     value & opt (some token_conv) None & info ["token";"t"] ~docv:"TOKEN" ~doc:
       "Your token on the learn-ocaml server. This is required to submit \
@@ -124,7 +138,7 @@ module Args = struct
   let term =
     let apply
         server_url solution_file exercise_id output_format dont_submit
-        color_when verbose token local set_options print_token fetch version =
+        color_when verbose create_token token local set_options print_token fetch version =
       let color = match color_when with
         | Some o -> o
         | None -> Unix.(isatty stdout) && Sys.getenv_opt "TERM" <> Some "dumb"
@@ -137,6 +151,7 @@ module Args = struct
         submit = not dont_submit;
         color;
         verbosity = List.length verbose;
+        create_token;
         token;
         local;
         set_options;
@@ -147,7 +162,7 @@ module Args = struct
     in
     Term.(const apply
           $server_url $solution_file $exercise_id $output_format $dont_submit
-          $color_when $verbose $token $local $set_options $print_token $fetch
+          $color_when $verbose $create_token $token $local $set_options $print_token $fetch
           $version)
 end
 
@@ -529,31 +544,33 @@ let check_server_version server =
      | e -> Printexc.to_string e);
   exit 1
 
+
+  let get_server = 
+    let default_server = Uri.of_string "http://learn-ocaml.org" in
+    function
+      | Some s -> s
+      | None ->
+          Printf.eprintf
+            "Please specify the address of the learn-ocaml server to use \
+              [default: %s]: " (Uri.to_string default_server);
+          let uri s =
+            let u = Uri.of_string s in
+            match Uri.scheme u with
+            | None -> Uri.with_scheme u (Some "http")
+            | Some ("http" (* | "https" *)) -> u
+            | Some s ->
+                failwith (Printf.sprintf
+                            "unsupported scheme %S, please use http://."
+                            s)
+          in
+            Console.input ~default:default_server uri
+
+  let get_new_token server nickname =
+    fetch server (Api.Create_token (None, nickname))
+      
 let init ?(local=false) ?server ?token () =
   let path = if local then ConfigFile.local_path else ConfigFile.user_path in
-  let default_server = Uri.of_string "http://learn-ocaml.org" in
-  let server =
-    match server with
-    | Some s -> s
-    | None ->
-        Printf.eprintf
-          "Please specify the address of the learn-ocaml server to use \
-           [default: %s]: " (Uri.to_string default_server);
-        let uri s =
-          let u = Uri.of_string s in
-          match Uri.scheme u with
-          | None -> Uri.with_scheme u (Some "http")
-          | Some ("http" (* | "https" *)) -> u
-          | Some s ->
-              failwith (Printf.sprintf
-                          "unsupported scheme %S, please use http://."
-                          s)
-        in
-        Console.input ~default:default_server uri
-  in
-  let get_new_token nickname =
-    fetch server (Api.Create_token (None, nickname))
-  in
+  let server = get_server server in
   let get_token () =
     match token with
     | Some t -> Lwt.return t
@@ -568,7 +585,7 @@ let init ?(local=false) ?server ?token () =
         | Some t -> Lwt.return t
         | None ->
             Printf.eprintf "Please enter a nickname: %!";
-            get_new_token
+            get_new_token server
               (Console.input
                  (fun s -> if String.length s < 2 then None else Some s))
   in
@@ -578,6 +595,8 @@ let init ?(local=false) ?server ?token () =
   ConfigFile.write path config >|= fun () ->
   Printf.eprintf "Configuration written to %s\n%!" path;
   config
+
+  
 
 let get_config ?local ?(save_back=false) server_opt token_opt =
   match ConfigFile.path ?local () with
@@ -605,6 +624,16 @@ let main o =
   Console.enable_utf8 := o.Args.color;
   if o.Args.version then
     (print_endline version; exit 0);
+  
+  
+    let nickname =
+    match o.Args.create_token with
+    | None -> Printf.eprintf "You must specify a nickname.\n%!"; exit 2
+    | Some nickname -> nickname
+    in
+    (get_new_token (get_server o.server_url) nickname
+    >>= fun token -> print_endline (Token.to_string token); exit 0);
+    
   let open Args in
   get_config ~local:o.local ~save_back:o.set_options o.server_url o.token
   >>= fun { ConfigFile.server; token } ->
